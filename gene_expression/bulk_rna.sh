@@ -1,3 +1,5 @@
+# remap and quantify rna-seq samples with new genome
+
 # load required modules
 module load java/21.0.4
 
