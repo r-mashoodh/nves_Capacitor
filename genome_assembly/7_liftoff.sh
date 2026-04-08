@@ -1,3 +1,7 @@
+#!/bin/bash
+
+## use liftoff to annotate gene models from original Vespilloides genome 
+
 # https://github.com/agshumate/LiftoffTools
 # conda install -c bioconda liftofftools
 
