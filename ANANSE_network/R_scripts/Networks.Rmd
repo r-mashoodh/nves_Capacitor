@@ -1,0 +1,1423 @@
+---
+title: "Network (ANANSE) output summary"
+author: "R. Mashoodh"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(data.table)
+library(gridExtra)
+library(tidyverse)
+library(igraph)
+library(ggplotify)
+library(ggpubr)
+library(kableExtra)
+library(ggplot2)
+library(ggrepel)
+library(scales)
+library(patchwork)
+
+# load functions from Perez-Posada et al., Nat Eco Evo
+source("network_properties_functions.R")
+# load my custom function
+source("plot_network_v2_function.R")
+source("topGO_wrapper.R")
+source("~/Dropbox/Lab/Projects/Beetles/Genome_Reassembly/GRN_ananse/plot_network_dros_names.R")
+
+```
+
+
+```{r load_data, echo=F}
+# Network files
+nw_FC <- LoadNetworkData("../results4/FC_network.tsv")
+nw_NC <- LoadNetworkData("../results4/NC_network.tsv")
+
+# TF annotation table - uniprot gene name must be first column
+tflist_df <- as.data.frame(fread("table_Nvi2_genes_Putative_TFs_only_Winterpro_copy.txt"))
+tflist_df <- tflist_df[, c("uniprot_Gene_name", "PFAM", "Gene_ID")]
+colnames(tflist_df)[1:2] <- c("gene", "TFclass")
+tflist_df$family_simple <- gsub(",.*", "", tflist_df$TFclass)
+
+# Assign colours by TF family
+family_colors <- c(
+  "Homeobox"  = "#E41A1C", "zf-C2H2"  = "#377EB8",
+  "bZIP_1"    = "#4DAF4A", "bZIP_2"   = "#4DAF4A",
+  "bZIP_Maf"  = "#4DAF4A", "HLH"      = "#984EA3",
+  "Forkhead"  = "#FF7F00", "HMG_box"  = "#A65628",
+  "SRF-TF"    = "#F781BF", "zf-C4"    = "#66C2A5",
+  "TSC22"     = "#FC8D62", "BTB"      = "#8DA0CB",
+  "PAX"       = "#E78AC3")
+
+tflist_df$col <- family_colors[tflist_df$family_simple]
+tflist_df$col[is.na(tflist_df$col)] <- "gray"
+
+# Influence files
+fc_influence <- as.data.frame(fread("../results4/fc_influence.tsv"))
+nc_influence <- as.data.frame(fread("../results4/nc_influence.tsv"))
+
+# Differential networks
+diff_FC <- read_tsv("../results4/fc_influence_diffnetwork.tsv")
+diff_NC <- read_tsv("../results4/nc_influence_diffnetwork.tsv")
+```
+
+
+```{r build, echo=FALSE}
+# Build igraph objects - keep top 15% of edges by probability
+g_FC <- GenerateNetwork(nw_FC, q = 0.85)
+g_NC <- GenerateNetwork(nw_NC, q = 0.85)
+
+# Calculate node metrics: degree, centrality, betweenness
+g_FC <- vertex_metrics(g_FC)
+g_NC <- vertex_metrics(g_NC)
+
+# Annotate nodes with TF class and colour from tflist
+g_FC <- ParseNetwork(g_FC, list_attr = list(tflist_df))[[1]]
+g_NC <- ParseNetwork(g_NC, list_attr = list(tflist_df))[[1]]
+
+# Correct TF tagging - only genes in tflist with outdegree > 0 are true TFs
+V(g_FC)$is_TF <- V(g_FC)$TFclass != "" & V(g_FC)$outdegree > 0
+V(g_NC)$is_TF <- V(g_NC)$TFclass != "" & V(g_NC)$outdegree > 0
+```
+
+### 1. Network Summary
+
+These networks represent the predicted gene regulatory interactions in larvae receiving Full Care (FC) or No Care (NC) from parents. Each network is built from ANANSE using chromatin accessibility and gene expression data, filtered to the top 15% of interactions by probability. The summary shows the overall architecture of each network including the number of active transcription factors and their target genes.
+
+```{r summary_networks, echo=FALSE}
+summary_df <- data.frame(
+  network   = c("FC", "NC"),
+  nodes     = c(vcount(g_FC),       vcount(g_NC)),
+  edges     = c(ecount(g_FC),       ecount(g_NC)),
+  true_TFs  = c(sum(V(g_FC)$is_TF), sum(V(g_NC)$is_TF)),
+  n_targets = c(sum(V(g_FC)$is_tg), sum(V(g_NC)$is_tg))
+)
+knitr::kable(summary_df, caption = "Network summary statistics")
+
+```
+
+The top TFs in the raw network appear to be the same. So development is broadly progressing the same, the issue is more that there are subtle differences in rewiring of the network that is producing variation. 
+
+Top TFs in FC by centrality:
+```{r top_TFs_central_FC, echo=FALSE}
+# Top 10 TFs by centrality in each network
+print(V(g_FC)$name[V(g_FC)$is_TF][order(V(g_FC)$centr[V(g_FC)$is_TF], decreasing=T)][1:10])
+```
+
+Top TFs in NC by centrality:
+```{r top_TFs_central_NC, echo=FALSE}
+print(V(g_NC)$name[V(g_NC)$is_TF][order(V(g_NC)$centr[V(g_NC)$is_TF], decreasing=T)][1:10])
+```
+
+### 2. Compare Networks
+
+A direct comparison of the FC and NC regulatory networks. The comparative metrics table highlights key structural differences — FC has more active TFs with higher median connectivity, while NC regulates more exclusive target genes. The majority of TFs (~172) and targets (~9,800) are shared between conditions, with the differences concentrated in a small but potentially meaningful subset.
+
+```{r compare, echo=FALSE}
+results_FC <- CompareNetworks(
+  g_a = g_NC,
+  g_b = g_FC,
+  name_network_a = "NC",
+  name_network_b = "FC",
+  influence = fc_influence,
+  tfs = tflist_df,
+  q_targets = 0.9
+)
+```
+
+```{r compare2, echo=FALSE}
+## code sometimes need this so keep for now so it doesnt break
+results_NC <- CompareNetworks(
+  g_a = g_FC,
+  g_b = g_NC,
+  name_network_a = "FC",
+  name_network_b = "NC",
+  influence = nc_influence,
+  tfs = tflist_df,
+  q_targets = 0.9
+)
+```
+
+
+### Comparative Metrics Table
+
+```{r comparative_table, echo=FALSE}
+
+knitr::kable(
+  results_FC$comparative %>% mutate(across(where(is.numeric), ~round(., 0))),
+  col.names = c("Metric", "NC", "FC"),
+  caption = "Side-by-side network metrics") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE)
+
+library(flextable)
+library(officer)
+
+doc <- read_docx() %>%
+  body_add_par("Side-by-side network metrics", style = "heading 1") %>%
+  body_add_flextable(
+    results_FC$comparative %>% 
+      mutate(across(where(is.numeric), ~round(., 0))) %>%
+      rename(Metric = 1, NC = 2, FC = 3) %>%
+      flextable() %>% 
+      autofit()
+  )
+
+print(doc, target = "network_out/network_metrics_table.docx")
+```
+
+
+### Exclusive TFs to each Network
+
+TFs present in one network but absent from the other represent condition-specific regulatory activity. FC has two exclusive TFs (ETS6, EVE-2) while NC has four (FXF1B, GATA6, HEN1, HLH13). The small number of exclusive TFs suggests the two conditions share a largely conserved regulatory toolkit, with differences driven more by changes in TF activity than presence/absence.
+
+TFs exclusive to FC:
+```{r exclusive_tfs_fc, echo=FALSE}
+print(results_FC$TF_overlap$TFs_exclusive_b)
+```
+
+TFs exclusive to NC
+```{r exclusive_tfs_nc, echo=FALSE}
+print(results_FC$TF_overlap$TFs_exclusive_a)
+```
+
+
+### 3. Top Regulated Target Genes
+
+These are the most heavily regulated condition-exclusive target genes — those receiving the most incoming TF connections among genes regulated in only one condition. FC-exclusive top targets are enriched for cuticle structural proteins and the neuropeptide CART-2, while NC-exclusive targets include digestive proteases and copper transporters, suggesting distinct physiological programmes associated with each condition.
+
+A target gene is "top" if its indegree (number of TFs regulating it) is above the 90th percentile of indegree values among all exclusive targets in that condition.
+
+Top targets exclusive to FC:
+```{r top_targets, echo=F}
+# Load full gene info table
+allInfo <- read_tsv("~/Desktop/table_Nvi2_genes_allinfo_Droso_TFs_Winterpro.tsv")
+
+# Function to annotate a gene list with NCBI name and Drosophila ortholog
+annotate_targets <- function(gene_list, info_table) {
+  df <- data.frame(gene = gene_list)
+  df <- merge(
+    df,
+    info_table[, c("uniprot_Gene_name", "Gene_name (NCBI)", "Drosphila_ortholog")],
+    by.x = "gene",
+    by.y = "uniprot_Gene_name",
+    all.x = TRUE
+  )
+  colnames(df) <- c("Gene", "NCBI_name", "Drosophila_ortholog")
+  df[is.na(df)] <- ""
+  df <- df[order(df$Gene),]
+  rownames(df) <- NULL
+  return(df)
+}
+
+# Annotate exclusive targets
+nc_top_annotated <- annotate_targets(
+  results_FC$tg_overlap_top$tgs_exclusive_a_top, 
+  allInfo
+)
+
+fc_top_annotated <- annotate_targets(
+  results_FC$tg_overlap_top$tgs_exclusive_b_top, 
+  allInfo
+)
+
+# Display as nice tables
+knitr::kable(fc_top_annotated,
+             caption = "Highly regulated targets exclusive to FC") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+```
+
+Top targets exclusive to NC:
+```{r FC_excl_table, echo=F}
+knitr::kable(nc_top_annotated, 
+             caption = "Highly regulated targets exclusive to NC") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+```
+
+Files for exclusive genes are written to:
+FC: results4/Exclusive_tgs_FC.tsv
+NC: results4/Exclusive_tgs_NC.tsv
+
+But the key themes for all the exclusive Target Genes from a quick scan are:
+
+```{r exclusive_lists, echo=FALSE}
+### exclusive to FC
+excl_FC <- allInfo %>% 
+  filter(uniprot_Gene_name %in% results_FC$tg_overlap$tgs_exclusive_b) 
+
+write_tsv(excl_FC, "../results4/Exclusive_tgs_FC.tsv")
+
+
+### exclusive to NC
+excl_NC <- allInfo %>% 
+  filter(uniprot_Gene_name %in% results_FC$tg_overlap$tgs_exclusive_a)
+
+write_tsv(excl_NC, "../results4/Exclusive_tgs_NC.tsv")
+
+
+themes_table <- data.frame(
+  `FC Exclusive` = c(
+    "Cuticle remodelling",
+    "Neural signalling (CART-2, serotonin receptor)",
+    "Immune/inflammatory (prostaglandin)",
+    "Juvenile hormone synthesis",
+    ""
+  ),
+  `NC Exclusive` = c(
+    "Cytochrome P450 detoxification",
+    "Odorant binding / chemosensory",
+    "Juvenile hormone metabolism",
+    "Wax / lipid biosynthesis",
+    "tRNA reprogramming"
+  ),
+  check.names = FALSE
+)
+
+knitr::kable(
+  themes_table,
+  caption = "Key biological themes among condition-exclusive target genes"
+) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE)
+```
+
+
+There are more NC exclusive targets than FC. However, there are no statistical differences in indegree for these exclusive TFs between the two conditions (p=0.43).
+
+```{r excl_tgs_stats, echo=FALSE}
+
+# Get indegree for exclusive targets in each condition
+fc_excl_indegree <- V(g_FC)$indegree[V(g_FC)$name %in% results_FC$tg_overlap$tgs_exclusive_b]
+nc_excl_indegree <- V(g_NC)$indegree[V(g_NC)$name %in% results_FC$tg_overlap$tgs_exclusive_a]
+
+# Summary statistics
+stats_df <- data.frame(
+  condition = c("FC exclusive targets", "NC exclusive targets"),
+  n         = c(length(fc_excl_indegree), length(nc_excl_indegree)),
+  mean      = c(mean(fc_excl_indegree),   mean(nc_excl_indegree)),
+  median    = c(median(fc_excl_indegree), median(nc_excl_indegree)),
+  sd        = c(sd(fc_excl_indegree),     sd(nc_excl_indegree)),
+  min       = c(min(fc_excl_indegree),    min(nc_excl_indegree)),
+  max       = c(max(fc_excl_indegree),    max(nc_excl_indegree)),
+  q90       = c(quantile(fc_excl_indegree, 0.9), quantile(nc_excl_indegree, 0.9))
+)
+
+knitr::kable(stats_df, digits = 2,
+             caption = "Indegree statistics for condition-exclusive target genes") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+
+# # Also test if distributions are significantly different
+# wilcox_test <- wilcox.test(fc_excl_indegree, nc_excl_indegree)
+# cat("\nWilcoxon rank-sum test FC vs NC exclusive target indegree:\n")
+# cat("W =", wilcox_test$statistic, ", p =", wilcox_test$p.value, "\n")
+
+```
+
+### 4. Centrality Changes
+
+Closeness centrality measures how quickly a TF can reach all other nodes in the network — a proxy for how broadly influential it is. TFs above the diagonal became more central in FC, while those below became more central in NC. Most TFs show modest shifts, but a small number show substantial changes, suggesting targeted rather than wholesale reorganisation of the regulatory hierarchy between conditions.
+
+The top changed in centrality appear to be the ones that feature in the NC- and FC-specific networks.
+
+TFs most increased in centrality in FC:
+```{r centrality, echo=FALSE}
+centr_tf <- results_FC$centrality_changes_TFs
+centr_tf$ratio <- centr_tf$b / centr_tf$a
+centr_tf$diff  <- centr_tf$b - centr_tf$a
+
+#cat("TFs most increased in centrality in FC:\n")
+print(head(centr_tf[order(centr_tf$ratio, decreasing=T),], 15))
+```
+
+TFs most increased (top 10) in centrality in NC:
+```{r centrality2, echo=FALSE}
+#cat("\nTFs most increased in centrality in NC:\n")
+print(head(centr_tf[order(centr_tf$ratio, decreasing=F),], 15))
+```
+
+```{r centrality_plot, fig.width=7, fig.height=6, echo=F, fig.align = "center"}
+
+# set colours
+blue <- "#0c2c84"
+red  <- "#b10026"
+
+# Prepare data
+centr_tf$gene <- rownames(centr_tf)
+centr_tf$label <- ifelse(
+  centr_tf$gene %in% centr_tf$gene[order(abs(centr_tf$diff), decreasing=T)][1:20],
+  centr_tf$gene, ""
+)
+
+centr_tf$point_col <- ifelse(
+  centr_tf$label != "" & centr_tf$b > centr_tf$a, red,
+  ifelse(
+    centr_tf$label != "" & centr_tf$b <= centr_tf$a, blue,
+    "grey80"
+  )
+)
+
+ggplot(centr_tf, aes(x = a, y = b)) +
+  geom_point(aes(fill = point_col),
+             shape = 21, color = "white", size = 3, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, lty = 2, color = "black") +
+  geom_text_repel(aes(label = label),
+                  size = 3,
+                  fontface = "bold",
+                  box.padding = 0.5,
+                  point.padding = 0.3,
+                  max.overlaps = 20) +
+  scale_fill_identity() +
+  labs(x = "Centrality in NC",
+       y = "Centrality in FC",
+       title = "TF centrality shifts NC vs FC") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14))
+
+```
+
+
+
+### 5. Betweenness Changes
+
+Betweenness measures how often a TF acts as a bridge between different parts of the network. TFs with high betweenness are regulatory bottlenecks through which information flows between gene modules. FC-gaining TFs (red) become new bridges in the care network, while NC-dominant TFs (blue) such as E75 — an ecdysone receptor — serve as major hubs specifically in the no-care network, consistent with hormonal regulation of non-caring behaviour.
+
+TFs most increased in betweenness in FC:
+```{r betweenness, echo=F}
+betw_tf <- results_FC$betweenness_changes_TFs
+betw_tf$ratio <- (betw_tf$b + 0.01) / (betw_tf$a + 0.01)
+betw_tf$diff  <- betw_tf$b - betw_tf$a
+betw_tf$gene  <- rownames(betw_tf)  # add this
+
+#cat("TFs most increased in betweenness in FC:\n")
+print(head(betw_tf[order(betw_tf$diff, decreasing=T),], 10))
+```
+
+TFs most increased in betweenness in NC:
+```{r betweenness2, echo=F}
+#cat("\nTFs most increased in betweenness in NC:\n")
+print(head(betw_tf[order(betw_tf$diff, decreasing=F),], 10))
+```
+
+The values of betweenness can be large so ratio might not be a great indicator, but then neither is difference, but I've highlighted the top 10 changed in ratio and change in abs value just in case its useful for visualising.
+
+```{r betweenness_plot, fig.width=7, fig.height=6, echo=F, fig.align = "center"}
+blue <- "#0c2c84"
+red  <- "#b10026"
+# Label top 5 by ratio (FC gainers) AND top 5 by diff (overall biggest shifts)
+top_by_ratio <- betw_tf$gene[order(betw_tf$ratio, decreasing=T)][1:10]
+top_by_diff  <- betw_tf$gene[order(abs(betw_tf$diff), decreasing=T)][1:10]
+manual       <- c("SMAD3")
+
+betw_tf$label <- ifelse(
+  betw_tf$gene %in% c(top_by_ratio, top_by_diff, manual),
+  betw_tf$gene, ""
+)
+
+betw_tf$point_col <- ifelse(
+  betw_tf$label != "" & betw_tf$b > betw_tf$a, red,
+  ifelse(
+    betw_tf$label != "" & betw_tf$b <= betw_tf$a, blue,
+    "grey80"
+  )
+)
+
+ggplot(betw_tf, aes(x = a + 1, y = b + 1)) +
+  geom_point(
+    aes(fill = point_col),
+    shape = 21, color = "white", size = 3, alpha = 0.8
+  ) +
+  geom_abline(slope = 1, intercept = 0, lty = 2, color = "black") +
+  geom_text_repel(
+    aes(label = label),
+    size = 3,
+    fontface = "bold",
+    box.padding = 0.5,
+    point.padding = 0.3,
+    max.overlaps = 20
+  ) +
+  scale_fill_identity() +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    x = "Betweenness in NC",
+    y = "Betweenness in FC",
+    title = "TF betweenness shifts NC vs FC"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14))
+```
+
+same plot but on a log scale:
+
+```{r betweenness_log_scale, echo=F, fig.align = "center"}
+ggplot(betw_tf, aes(x = a + 1, y = b + 1)) +
+  geom_point(
+    aes(fill = point_col),
+    shape = 21, color = "white", size = 3, alpha = 0.8
+  ) +
+  geom_abline(slope = 1, intercept = 0, lty = 2, color = "black") +
+  geom_text_repel(
+    aes(label = label),
+    size = 3,
+    fontface = "bold",
+    box.padding = 0.5,
+    point.padding = 0.3,
+    max.overlaps = 20
+  ) +
+  scale_fill_identity() +
+  scale_x_log10(labels = comma) +
+  scale_y_log10(labels = comma) +
+  labs(
+    x = "Betweenness in NC (log scale)",
+    y = "Betweenness in FC (log scale)",
+    title = "TF betweenness shifts NC vs FC"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14))
+```
+
+
+### 5. TF Family Enrichment
+
+Examining whether particular TF families are disproportionately represented among the top influential TFs in each condition. This reveals whether care and no-care regulatory programmes are driven by distinct classes of transcription factors or whether the same families are involved but with different members leading.
+
+There doesn't seem to be a huge change in the class of active TFs in each network:
+
+```{r tf_families, echo=F}
+class_NC <- results_FC$centrality_TFclass_a
+class_FC <- results_FC$centrality_TFclass_b
+class_NC$family <- gsub(",.*", "", class_NC$class)
+class_FC$family <- gsub(",.*", "", class_FC$class)
+
+# Count TFs per family
+fam_NC <- as.data.frame(table(class_NC$family)); colnames(fam_NC) <- c("family","count_NC")
+fam_FC <- as.data.frame(table(class_FC$family)); colnames(fam_FC) <- c("family","count_FC")
+fam_comp <- merge(fam_NC, fam_FC, by = "family", all = TRUE)
+fam_comp[is.na(fam_comp)] <- 0
+fam_comp$diff <- fam_comp$count_FC - fam_comp$count_NC
+fam_comp <- fam_comp[order(fam_comp$diff, decreasing=TRUE),]
+
+knitr::kable(fam_comp[fam_comp$diff != 0,], 
+             caption = "TF families with different member counts between FC and NC",
+             row.names = FALSE)
+```
+
+There doesn't seem something striking happening in terms of what classes of TFs are changing in centrality. Changes are very small.
+
+```{r family_centrality_plot, fig.width=9, fig.height=6, echo=F, fig.align = "center"}
+cent_NC <- aggregate(centr ~ family, data = class_NC, FUN = mean)
+cent_FC <- aggregate(centr ~ family, data = class_FC, FUN = mean)
+colnames(cent_NC) <- c("family","centr_NC")
+colnames(cent_FC) <- c("family","centr_FC")
+
+fam_centr <- merge(cent_NC, cent_FC, by = "family")
+fam_centr$ratio <- fam_centr$centr_FC / fam_centr$centr_NC
+fam_centr <- fam_centr[order(fam_centr$ratio, decreasing=TRUE),]
+
+top_fam <- rbind(head(fam_centr, 10), tail(fam_centr, 10))
+
+par(mar = c(10,4,4,2))
+barplot(
+  top_fam$ratio - 1,
+  names.arg = top_fam$family,
+  las = 2,
+  col = ifelse(top_fam$ratio > 1, "darkorange", "purple"),
+  main = "TF family centrality shift (FC/NC ratio - 1)",
+  ylab = "Deviation from no change",
+  border = NA, bty = "n"
+)
+abline(h = 0, lty = 2)
+```
+
+Another way of visualising:
+
+```{r TFclass_between, echo=F, fig.height=10, fig.width=7, fig.align = "center" }
+# Prepare data from centrality_TFclass
+class_NC <- results_FC$centrality_TFclass_a %>%
+  mutate(family = gsub(",.*", "", class),
+         condition = "NC")
+
+class_FC <- results_FC$centrality_TFclass_b %>%
+  mutate(family = gsub(",.*", "", class),
+         condition = "FC")
+
+combined_class <- bind_rows(class_NC, class_FC) %>%
+  filter(family != "") %>%
+  group_by(family) %>%
+  mutate(rel_centr = (centr - min(centr)) / (max(centr) - min(centr))) %>%
+  ungroup()
+
+
+## Keep only families with >= 5 members for readability
+keep_families <- combined_class %>%
+  count(family) %>%
+  filter(n >= 4) %>%
+  pull(family)
+
+combined_class_filt <- combined_class %>%
+  filter(family %in% keep_families)
+
+# Consistent ordering by FC mean centrality
+family_order <- combined_class_filt %>%
+  filter(condition == "FC") %>%
+  group_by(family) %>%
+  summarise(mean_centr = mean(rel_centr)) %>%
+  arrange(mean_centr) %>%
+  pull(family)
+
+combined_class_filt$family <- factor(combined_class_filt$family, levels = family_order)
+
+# p_NC <- combined_class_filt %>%
+#   filter(condition == "NC") %>%
+#   ggplot(aes(x = rel_centr, y = family)) +
+#   geom_boxplot(fill = blue, alpha = 0.3, outlier.shape = NA, color = blue) +
+#   geom_jitter(color = blue, size = 1, alpha = 0.5, width = 0, height = 0.2) +
+#   scale_x_reverse(limits = c(1, 0)) +
+#   labs(x = "Relative centrality", y = NULL, title = "No Care") +
+#   theme_classic() +
+#   theme(plot.title = element_text(face = "bold", hjust = 0.5, color = blue),
+#         axis.text.y = element_blank(),
+#         axis.ticks.y = element_blank())
+
+p_NC <- combined_class_filt %>%
+  filter(condition == "NC") %>%
+  ggplot(aes(x = rel_centr, y = family)) +
+  geom_boxplot(fill = blue, alpha = 0.3, outlier.shape = NA, color = blue) +
+  geom_jitter(color = blue, size = 1, alpha = 0.5, width = 0, height = 0.2) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 1) +  # ✅ outer axis
+  scale_x_reverse(limits = c(1, 0), expand = c(0, 0)) +
+  labs(x = "Relative centrality", y = NULL, title = "No Care") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.border = element_blank(),
+    axis.line.y = element_blank()
+  )
+
+p_labels <- combined_class_filt %>%
+  distinct(family) %>%
+  ggplot(aes(x = 1, y = family)) +
+  geom_text(aes(label = family), size = 2.5) +
+  theme_void()
+
+p_FC <- combined_class_filt %>%
+  filter(condition == "FC") %>%
+  ggplot(aes(x = rel_centr, y = family)) +
+  geom_boxplot(fill = red, alpha = 0.3, outlier.shape = NA, color = red) +
+  geom_jitter(color = red, size = 1, alpha = 0.5, width = 0, height = 0.2) +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(x = "Relative centrality", y = NULL, title = "Full Care") +
+  theme_classic() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+p_FC + p_labels + p_NC + plot_layout(widths = c(3, 1.5, 3))
+```
+
+
+
+### 6. Modularity
+
+Community structure was assessed using the Louvain algorithm on both the full networks and the top 50 TF differential networks. The full networks show low and near-identical modularity (FC: 0.19, NC: 0.20), dominated by a single large community. However, there is a 3rd small community in NC with 51 genes.
+
+```{r modularity, echo = F}
+set.seed(42)
+comm_FC <- cluster_louvain(as.undirected(g_FC))
+comm_NC <- cluster_louvain(as.undirected(g_NC))
+
+# Summary table
+mod_df <- data.frame(
+  Metric    = c("Modularity", "Number of communities", 
+                "Largest community", "Second community", "Third community"),
+  FC        = c(round(modularity(comm_FC), 3),
+                length(comm_FC),
+                sort(sizes(comm_FC), decreasing=TRUE)[1],
+                sort(sizes(comm_FC), decreasing=TRUE)[2],
+                "-"),
+  NC        = c(round(modularity(comm_NC), 3),
+                length(comm_NC),
+                sort(sizes(comm_NC), decreasing=TRUE)[1],
+                sort(sizes(comm_NC), decreasing=TRUE)[2],
+                sort(sizes(comm_NC), decreasing=TRUE)[3])
+)
+
+knitr::kable(mod_df,
+             col.names = c("Metric", "FC", "NC"),
+             caption = "Network community structure") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+```
+
+We can look more closely at what is in this 3rd community. 
+
+The community looks like it could represent a neural signalling and metabolic module specific to NC. The presence of PIEZO (mechanosensation), glutamate decarboxylase (GABA), and multiple mitochondrial carriers suggests larvae not receiving care may be activating stress-responsive neural and metabolic pathways. This could reflect the physiological challenges of developing without parental provisioning.
+
+```{r comm3, echo=F}
+# Which genes are in the small NC community?
+nc_community3 <- V(g_NC)$name[membership(comm_NC) == 3]
+cat("Genes in NC community 3:\n")
+print(nc_community3)
+
+# Are they TFs or target genes?
+cat("\nTFs in community 3:\n")
+print(nc_community3[nc_community3 %in% tflist_df$gene])
+
+# Cross reference with allInfo for annotations
+# allInfo %>% 
+#   filter(uniprot_Gene_name %in% nc_community3) %>%
+#   select(uniprot_Gene_name, `Gene_name (NCBI)`, Drosphila_ortholog, PFAM) %>%
+#   print(n = Inf)
+
+nc_comm3_annotated <- allInfo %>%
+  filter(uniprot_Gene_name %in% nc_community3) %>%
+  select(Gene = uniprot_Gene_name,
+         NCBI_name = `Gene_name (NCBI)`,
+         Drosophila_ortholog = Drosphila_ortholog,
+         PFAM) %>%
+  mutate(Theme = case_when(
+    grepl("kinase|signaling|signal", NCBI_name, ignore.case = TRUE) ~ "Cell signalling & kinases",
+    grepl("mitochondrial|isocitrate|cytochrome|oxidase", NCBI_name, ignore.case = TRUE) ~ "Mitochondrial / metabolism",
+    grepl("piezo|glutamate|chaoptin|ataxin", NCBI_name, ignore.case = TRUE) ~ "Neural / sensory",
+    grepl("methyl|chiffon|DNA replication", NCBI_name, ignore.case = TRUE) ~ "Epigenetic / chromatin",
+    grepl("ribosom|RNA|splicing|processome", NCBI_name, ignore.case = TRUE) ~ "RNA processing / ribosome",
+    grepl("proteasome|calnexin|prefoldin|dnaJ", NCBI_name, ignore.case = TRUE) ~ "Proteostasis",
+    TRUE ~ "Other"
+  )) %>%
+  select(Theme, Gene, NCBI_name, Drosophila_ortholog, PFAM) %>%  # Theme first
+  arrange(Theme, Gene) %>% 
+  filter(Theme!="Other")
+
+knitr::kable(
+  nc_comm3_annotated,
+  caption = "Genes in NC-specific regulatory community (Louvain community 3)",
+  col.names = c("Theme", "Gene", "NCBI Name", "Drosophila Ortholog", "PFAM")
+) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+
+### 6. Influence Results
+
+ANANSE influence scores quantify which TFs are predicted to drive the regulatory transition between conditions, combining fold change in expression with the breadth of downstream regulatory impact. Node size reflects the number of direct targets. 
+
+Top 20 TFs driving Full Care:
+```{r influence_tables, echo=F}
+#cat("Top 20 TFs driving Full Care:\n")
+print(head(results_FC$influence_results$influence_table[, 
+  c("factor","influence_score","factor_fc","TFclass")], 10))
+```
+
+Top 20 TFs driving No Care:
+```{r influence_tables2, echo=F}
+#cat("\nTop 20 TFs driving No Care:\n")
+print(head(results_NC$influence_results$influence_table[, 
+  c("factor","influence_score","factor_fc","TFclass")], 10))
+```
+
+```{r influence_plots, fig.width=16, fig.height=8, echo=F, fig.align = "center"}
+library(ggrepel)
+library(patchwork)
+
+# Colours
+# blue <- "#0c2c84"
+# red  <- "#b10026"
+
+red <- brewer.pal(9, "Set1")[1]   # Red-FC
+blue <- brewer.pal(9, "Set1")[2]   # Blue-NC
+
+# -- Full Care ---------------------------------------------------------------
+
+## change labels 
+names <- read_tsv("../results4/Ni2_ids_to_convert_for_Droso_orthologs.tsv")
+colnames(names)[2] <- c("factor")
+
+
+fc_influence <- fc_influence %>% 
+  left_join(names)
+
+top_factors_care <- fc_influence %>%
+  arrange(desc(influence_score)) %>%
+  head(25) %>%
+  pull(factor)
+
+fc_influence
+
+fc_inf <- ggplot(fc_influence, aes(x = factor_fc, y = influence_score,
+                                    colour = factor %in% top_factors_care)) +
+  geom_point(aes(size = direct_targets), alpha = 0.5) +
+  geom_text_repel(
+    data = fc_influence %>% filter(factor %in% top_factors_care),
+    aes(label = Drosphila_ortholog),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    segment.color = "black",
+    max.overlaps = 15
+  ) +
+  labs(
+    title = "Full Care",
+    x = "Log2 fold change of TF",
+    y = "Influence score",
+    size = "Targets"
+  ) +
+  scale_size_continuous(range = c(2, 11)) +
+  scale_colour_manual(values = c("grey", red), guide = "none") +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+# -- No Care --------------------------------------------------------------------
+
+nc_influence <- nc_influence %>% 
+  left_join(names)
+
+top_factors_nocare <- nc_influence %>%
+  arrange(desc(influence_score)) %>%
+  head(25) %>%
+  pull(factor)
+
+nc_inf <- ggplot(nc_influence, aes(x = factor_fc, y = influence_score,
+                                    colour = factor %in% top_factors_nocare)) +
+  geom_point(aes(size = direct_targets), alpha = 0.5) +
+  geom_text_repel(
+    data = nc_influence %>% filter(factor %in% top_factors_nocare),
+    aes(label = Drosphila_ortholog),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    segment.color = "black",
+    max.overlaps = Inf
+  ) +
+  labs(
+    title = "No Care",
+    x = "Log2 fold change of TF",
+    y = "Influence score",
+    size = "Targets"
+  ) +
+  scale_size_continuous(range = c(2, 11)) +
+  scale_colour_manual(values = c("grey", blue), guide = "none") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+# -- Combined -------------------------------------------------------------------
+fc_inf | nc_inf
+
+
+
+library(ggrepel)
+library(patchwork)
+
+red  <- brewer.pal(9, "Set1")[1]
+blue <- brewer.pal(9, "Set1")[2]
+
+# -- Load ortholog lookup --------------------------------------------------------
+orthologs <- read_tsv("../results4/Ni2_ids_to_convert_for_Droso_orthologs.tsv")
+colnames(orthologs)[2] <- "factor"
+
+# -- Full Care ------------------------------------------------------------------
+fc_influence <- fc_influence %>% 
+  left_join(orthologs, by = "factor") %>%
+  mutate(Drosphila_ortholog = ifelse(is.na(Drosphila_ortholog), factor, Drosphila_ortholog))
+
+top_factors_care <- fc_influence %>%
+  arrange(desc(influence_score)) %>%
+  head(25) %>%
+  pull(factor)
+
+fc_inf <- ggplot(fc_influence, aes(x = factor_fc, y = influence_score,
+                                    colour = factor %in% top_factors_care)) +
+  geom_point(aes(size = direct_targets), alpha = 0.5) +
+  geom_text_repel(
+    data = fc_influence %>% filter(factor %in% top_factors_care),
+    aes(label = Drosphila_ortholog),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    segment.color = "black",
+    max.overlaps = 15
+  ) +
+  labs(
+    title = "Full Care",
+    x = "Log2 fold change of TF",
+    y = "Influence score",
+    size = "Targets"
+  ) +
+  scale_size_continuous(range = c(2, 11)) +
+  scale_colour_manual(values = c("grey", red), guide = "none") +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+# -- No Care --------------------------------------------------------------------
+nc_influence <- nc_influence %>% 
+  left_join(orthologs, by = "factor") %>%
+  mutate(Drosphila_ortholog = ifelse(is.na(Drosphila_ortholog), factor, Drosphila_ortholog))
+
+top_factors_nocare <- nc_influence %>%
+  arrange(desc(influence_score)) %>%
+  head(25) %>%
+  pull(factor)
+
+nc_inf <- ggplot(nc_influence, aes(x = factor_fc, y = influence_score,
+                                    colour = factor %in% top_factors_nocare)) +
+  geom_point(aes(size = direct_targets), alpha = 0.5) +
+  geom_text_repel(
+    data = nc_influence %>% filter(factor %in% top_factors_nocare),
+    aes(label = Drosphila_ortholog),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    segment.color = "black",
+    max.overlaps = Inf
+  ) +
+  labs(
+    title = "No Care",
+    x = "Log2 fold change of TF",
+    y = "Influence score",
+    size = "Targets"
+  ) +
+  scale_size_continuous(range = c(2, 11)) +
+  scale_colour_manual(values = c("grey", blue), guide = "none") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+# -- Combined -------------------------------------------------------------------
+fc_inf | nc_inf
+
+```
+
+
+We can look at if there are particular TF classes that change in influence:
+
+```{r, echo=F, fig.align = "center"}
+fc_inf_families <- fc_influence %>%
+  arrange(desc(influence_score)) %>%
+  head(50) %>%
+  left_join(tflist_df[, c("gene", "family_simple")], by = c("factor" = "gene"))
+
+
+nc_inf_families <- nc_influence %>%
+  arrange(desc(influence_score)) %>%
+  head(50) %>%
+  left_join(tflist_df[, c("gene", "family_simple")], by = c("factor" = "gene"))
+
+
+
+# Combine family counts from both conditions
+fc_fam <- fc_inf_families %>%
+  group_by(family_simple) %>%
+  summarise(n = n()) %>%
+  mutate(condition = "FC")
+
+nc_fam <- nc_inf_families %>%        # this was missing
+  group_by(family_simple) %>%
+  summarise(n = n()) %>%
+  mutate(condition = "NC")
+
+fam_combined <- bind_rows(fc_fam, nc_fam) %>%
+  filter(!is.na(family_simple), family_simple != "") %>%
+  complete(family_simple, condition, fill = list(n = 0)) %>%
+  group_by(family_simple) %>%
+  mutate(total = sum(n)) %>%
+  ungroup() %>%
+  filter(total >= 2) %>%
+  arrange(desc(total))
+
+fam_combined <- fam_combined %>%
+  filter(total >= 2)
+
+ggplot(fam_combined, aes(x = reorder(family_simple, total), y = n, fill = condition)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("FC" = red, "NC" = blue)) +
+  coord_flip() +
+  labs(
+    x = "TF Family",
+    y = "Number of TFs in top 50 influence list",
+    title = "TF family representation in top 30 influence TFs",
+    fill = "Condition"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
+```
+
+
+We can also look at modularity for the top 50 TFs. 
+
+```{r diff_modularity, echo=F}
+# Top 50 influential TFs
+top50_FC <- fc_influence %>% arrange(desc(influence_score)) %>% head(45) %>% pull(factor)
+top50_NC <- nc_influence %>% arrange(desc(influence_score)) %>% head(45) %>% pull(factor)
+
+# Filter diff networks to top 50 TFs
+diff_FC_top <- diff_FC %>% filter(source %in% top50_FC, target %in% top50_FC)
+diff_NC_top <- diff_NC %>% filter(source %in% top50_NC, target %in% top50_NC)
+
+# Build graphs
+g_diff_FC_top <- graph_from_data_frame(diff_FC_top, directed = TRUE)
+g_diff_NC_top <- graph_from_data_frame(diff_NC_top, directed = TRUE)
+
+# Modularity
+set.seed(42)
+comm_diff_FC_top <- cluster_louvain(as.undirected(g_diff_FC_top))
+comm_diff_NC_top <- cluster_louvain(as.undirected(g_diff_NC_top))
+
+# Summary table
+diff_mod_df <- data.frame(
+  Metric = c(
+    "Number of TFs (nodes)",
+    "Number of edges",
+    "TF-TF edge density",
+    "Modularity",
+    "Number of communities"
+  ),
+  FC = c(
+    vcount(g_diff_FC_top),
+    nrow(diff_FC_top),
+    round(edge_density(g_diff_FC_top), 3),
+    round(modularity(comm_diff_FC_top), 3),
+    length(comm_diff_FC_top)
+  ),
+  NC = c(
+    vcount(g_diff_NC_top),
+    nrow(diff_NC_top),
+    round(edge_density(g_diff_NC_top), 3),
+    round(modularity(comm_diff_NC_top), 3),
+    length(comm_diff_NC_top)
+  )
+)
+
+knitr::kable(diff_mod_df,
+             col.names = c("Metric", "FC", "NC"),
+             caption = "Differential network community structure (top 50 influence TFs)") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+```
+
+Community sizes for the top 50 TFs network:
+
+```{r comm_size_table, echo=F}
+# Community sizes table
+comm_sizes_df <- data.frame(
+  Community = paste("Community", 1:max(length(comm_diff_FC_top), length(comm_diff_NC_top))),
+  FC = c(sort(sizes(comm_diff_FC_top), decreasing=TRUE),
+         rep("-", max(0, length(comm_diff_NC_top) - length(comm_diff_FC_top)))),
+  NC = c(sort(sizes(comm_diff_NC_top), decreasing=TRUE),
+         rep("-", max(0, length(comm_diff_FC_top) - length(comm_diff_NC_top))))
+)
+
+knitr::kable(comm_sizes_df,
+             col.names = c("Community", "FC size", "NC size"),
+             caption = "Community sizes in differential networks (top 50 influence TFs)") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE)
+```
+
+
+```{r diff_modularity_plot, echo=F, fig.width=14, fig.height=7, fig.align="center"}
+
+plot_community_network <- function(g, comm, title, node_color_scheme = NULL) {
+  
+  # Community membership
+  membership <- membership(comm)
+  n_comm <- length(unique(membership))
+  
+  # Node colours by community
+  comm_colors <- rainbow(n_comm)
+  node_colors <- comm_colors[membership]
+  
+  # Node size by degree
+  node_size <- degree(g, mode = "all")
+  node_size <- 5 + 20 * (node_size - min(node_size)) / (max(node_size) - min(node_size))
+  
+  # Layout
+  set.seed(42)
+  layout <- layout_with_kk(g)
+  
+  plot(comm, g,
+       layout       = layout,
+       vertex.size  = node_size,
+       vertex.label = V(g)$name,
+       vertex.label.cex  = 0.7,
+       vertex.label.color = "black",
+       vertex.color = node_colors,
+       edge.arrow.size = 0.2,
+       edge.color  = "grey60",
+       edge.width  = 0.5,
+       mark.groups = communities(comm),  # draws the hulls like your example
+       main        = title)
+}
+
+
+
+
+plot_community_network <- function(g, comm, title) {
+  
+  membership <- membership(comm)
+  n_comm <- length(unique(membership))
+  comm_colors <- rainbow(n_comm)
+  node_colors <- comm_colors[membership]
+  
+  node_size <- degree(g, mode = "all")
+  node_size <- 5 + 15 * (node_size - min(node_size)) / (max(node_size) - min(node_size))
+  
+  set.seed(42)
+  layout <- layout_with_fr(g)  # switch to Fruchterman-Reingold - spreads dense graphs better
+  
+  plot(comm, g,
+       layout             = layout,
+       vertex.size        = node_size,
+       vertex.label       = V(g)$name,
+       vertex.label.cex   = 0.6,
+       vertex.label.dist  = 0.5,  # push labels off node centres
+       vertex.label.color = "black",
+       vertex.color       = node_colors,
+       edge.arrow.size    = 0.1,
+       edge.color         = adjustcolor("grey40", alpha = 0.4),
+       edge.width         = 0.4,
+       mark.groups        = communities(comm),
+       mark.border        = NA,  # removes harsh community borders
+       main               = title)
+}
+
+plot_community_network <- function(g, comm, title) {
+  
+  membership <- membership(comm)
+  n_comm <- length(unique(membership))
+  comm_colors <- rainbow(n_comm)
+  node_colors <- comm_colors[membership]
+  
+  node_size <- degree(g, mode = "all")
+  node_size <- 5 + 15 * (node_size - min(node_size)) / (max(node_size) - min(node_size))
+  
+  set.seed(42)
+  layout <- layout_with_fr(g)
+  
+  plot(g,                          # plot directed graph, not comm object
+       layout             = layout,
+       vertex.size        = node_size,
+       vertex.label       = V(g)$name,
+       vertex.label.cex   = 0.6,
+       vertex.label.color = "black",
+       vertex.color       = node_colors,
+       edge.arrow.size    = 0.2,   # arrows now visible
+       edge.color         = adjustcolor("grey40", alpha = 0.4),
+       edge.width         = 0.4,
+       mark.groups        = communities(comm),
+       mark.border        = NA,
+       main               = title)
+}
+
+par(mfrow = c(1, 2))
+
+plot_community_network(
+  g    = as.undirected(g_diff_NC_top),
+  comm = comm_diff_NC_top,
+  title = "No Care — Top 50 TF Communities"
+)
+
+plot_community_network(
+  g    = as.undirected(g_diff_FC_top),
+  comm = comm_diff_FC_top,
+  title = "Full Care — Top 50 TF Communities"
+)
+
+```
+
+
+#### Plot differential regulatory networks
+
+This plots the top influential TFs and the differential networks to show what regulatory interactions are being prioritised in the network within each condition. 
+
+```{r diff_network_plots, echo=F, fig.align = "center"}
+shared_limits = c(0,4)
+
+# Don't save initially - combine and save later
+g1 <- plot_grn3(
+  influence_file = "../results4/nc_influence.tsv",
+  diffnet_file   = "../results4/nc_influence_diffnetwork.tsv",
+  save_plot      = FALSE,
+  n_tfs          = 25,
+  edge_min       = 0.1,
+  cmap           = "Blues",
+  title          = "No Care Regulatory Interactions",
+  layout         = "kk",
+  outdegree_limits = shared_limits,
+  label_lookup = names)
+
+g2 <- plot_grn3(
+  influence_file = "../results4/fc_influence.tsv",
+  diffnet_file   = "../results4/fc_influence_diffnetwork.tsv",
+  save_plot      = FALSE,
+  n_tfs          = 25,
+  edge_min       = 0.1,
+  cmap           = "Reds",
+  title          = "Care Regulatory Interactions",
+  layout         = "kk",
+  outdegree_limits = shared_limits,
+  label_lookup = names)
+
+# Combine and save with custom dimensions
+combined <- g1 | g2
+#combined
+
+g1
+```
+
+```{r diff_network_plots2, echo=F, fig.align = "center"}
+
+g2
+```
+
+
+```{r top30_metrics, echo=F}
+# Top 30 influential TFs
+top30_FC <- fc_influence %>% arrange(desc(influence_score)) %>% head(25) %>% pull(factor)
+top30_NC <- nc_influence %>% arrange(desc(influence_score)) %>% head(25) %>% pull(factor)
+
+# Filter diff networks to top 30 TFs only
+diff_FC_top30 <- diff_FC %>% filter(source %in% top30_FC, target %in% top30_FC)
+diff_NC_top30 <- diff_NC %>% filter(source %in% top30_NC, target %in% top30_NC)
+
+# Build graphs
+g_diff_FC_top30 <- graph_from_data_frame(diff_FC_top30, directed = TRUE)
+g_diff_NC_top30 <- graph_from_data_frame(diff_NC_top30, directed = TRUE)
+
+# Community detection
+set.seed(42)
+comm_FC_top30 <- cluster_louvain(as.undirected(g_diff_FC_top30))
+comm_NC_top30 <- cluster_louvain(as.undirected(g_diff_NC_top30))
+
+
+
+# Node-level metrics for each TF
+metrics_FC30 <- data.frame(
+  TF           = V(g_diff_FC_top30)$name,
+  condition    = "FC",
+  degree       = degree(g_diff_FC_top30, mode = "all"),
+  indegree     = degree(g_diff_FC_top30, mode = "in"),
+  outdegree    = degree(g_diff_FC_top30, mode = "out"),
+  betweenness  = round(betweenness(g_diff_FC_top30, normalized = TRUE), 4),
+  closeness    = round(closeness(g_diff_FC_top30, normalized = TRUE), 4),
+  community    = membership(comm_FC_top30)
+)
+
+metrics_NC30 <- data.frame(
+  TF           = V(g_diff_NC_top30)$name,
+  condition    = "NC",
+  degree       = degree(g_diff_NC_top30, mode = "all"),
+  indegree     = degree(g_diff_NC_top30, mode = "in"),
+  outdegree    = degree(g_diff_NC_top30, mode = "out"),
+  betweenness  = round(betweenness(g_diff_NC_top30, normalized = TRUE), 4),
+  closeness    = round(closeness(g_diff_NC_top30, normalized = TRUE), 4),
+  community    = membership(comm_NC_top30)
+)
+
+# Network-level summary
+summary_top30 <- data.frame(
+  Metric = c(
+    "Nodes (TFs)",
+    "Edges",
+    "Edge density",
+    "Modularity",
+    "Number of communities",
+    "Mean degree",
+    "Mean betweenness (normalised)"
+  ),
+  FC = c(
+    vcount(g_diff_FC_top30),
+    ecount(g_diff_FC_top30),
+    round(edge_density(g_diff_FC_top30), 3),
+    round(modularity(comm_FC_top30), 3),
+    length(comm_FC_top30),
+    round(mean(degree(g_diff_FC_top30)), 2),
+    round(mean(betweenness(g_diff_FC_top30, normalized = TRUE)), 4)
+  ),
+  NC = c(
+    vcount(g_diff_NC_top30),
+    ecount(g_diff_NC_top30),
+    round(edge_density(g_diff_NC_top30), 3),
+    round(modularity(comm_NC_top30), 3),
+    length(comm_NC_top30),
+    round(mean(degree(g_diff_NC_top30)), 2),
+    round(mean(betweenness(g_diff_NC_top30, normalized = TRUE)), 4)
+  )
+)
+
+knitr::kable(summary_top30,
+             col.names = c("Metric", "FC", "NC"),
+             caption = "Network metrics for top 30 influential TFs") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE)
+```
+
+
+```{r top30_node_metrics, echo=F}
+
+library(RColorBrewer)
+
+custom_colors <- c(brewer.pal(9, "Set1")[1],   # Red-FC
+                   brewer.pal(9, "Set1")[2])   # Blue-NC
+
+
+all_metrics30 <- bind_rows(metrics_FC30, metrics_NC30) %>%
+  arrange(condition, desc(degree))
+
+knitr::kable(all_metrics30,
+             caption = "Node-level metrics for top 30 influential TFs") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  scroll_box(height = "400px")
+
+
+all_metrics30 %>% 
+  group_by(condition) %>% 
+  summarise(mean_degree = mean(degree),
+            mean_indegree = mean(indegree),
+            mean_outdegree = mean(outdegree))
+
+all_metrics30 %>% 
+  ggplot(., aes(x=condition, y=degree)) +
+  geom_violin() +
+    geom_boxplot()
+
+all_metrics30 %>% 
+  ggplot(., aes(x=condition, y=indegree)) +
+  geom_violin() +
+    geom_boxplot()
+
+all_metrics30 %>% 
+  ggplot(., aes(x=condition, y=outdegree)) +
+  geom_violin() +
+    geom_boxplot()
+
+
+wilcox.test(degree      ~ condition, data = all_metrics30)
+wilcox.test(indegree    ~ condition, data = all_metrics30)
+wilcox.test(outdegree   ~ condition, data = all_metrics30)
+
+
+library(ggpubr)
+
+p1 <- all_metrics30 %>%
+  ggplot(aes(x = condition, y = degree, fill = condition)) +
+  geom_violin(alpha = 0.4) +
+  geom_boxplot(width = 0.2) +
+  #stat_compare_means(method = "wilcox.test", label = "p.format") +
+  scale_fill_manual(values = custom_colors) +
+  theme_classic() + labs(title = "Total degree")
+
+p2 <- all_metrics30 %>%
+  ggplot(aes(x = condition, y = indegree, fill = condition)) +
+  geom_violin(alpha = 0.4) +
+  geom_boxplot(width = 0.2) +
+  #stat_compare_means(method = "wilcox.test", label = "p.format") +
+  scale_fill_manual(values = custom_colors) +
+  theme_classic() + labs(title = "Indegree")
+
+p3 <- all_metrics30 %>%
+  ggplot(aes(x = condition, y = outdegree, fill = condition)) +
+  geom_violin(alpha = 0.4) +
+  geom_boxplot(width = 0.2) +
+  #stat_compare_means(method = "wilcox.test", label = "p.format") +
+  scale_fill_manual(values = custom_colors) +
+  theme_classic() + labs(title = "Outdegree")
+
+p1 + p2 + p3
+
+glimpse(all_metrics30)
+```
+
+```{r top30_targets, echo=F}
+# Top 30 influential TFs
+metrics_FC30 <- data.frame(
+  TF          = V(g_diff_FC_top30)$name,
+  condition   = "FC",
+  degree      = degree(g_diff_FC_top30, mode = "all"),
+  indegree    = degree(g_diff_FC_top30, mode = "in"),
+  outdegree   = degree(g_diff_FC_top30, mode = "out"),
+  betweenness = betweenness(g_diff_FC_top30, normalized = TRUE),
+  closeness   = closeness(g_diff_FC_top30, normalized = TRUE)
+)
+
+metrics_NC30 <- data.frame(
+  TF          = V(g_diff_NC_top30)$name,
+  condition   = "NC",
+  degree      = degree(g_diff_NC_top30, mode = "all"),
+  indegree    = degree(g_diff_NC_top30, mode = "in"),
+  outdegree   = degree(g_diff_NC_top30, mode = "out"),
+  betweenness = betweenness(g_diff_NC_top30, normalized = TRUE),
+  closeness   = closeness(g_diff_NC_top30, normalized = TRUE)
+)
+
+all_metrics30 <- bind_rows(metrics_FC30, metrics_NC30)
+
+
+
+# Betweenness plot
+p_btwn <- all_metrics30 %>%
+  ggplot(aes(x = condition, y = betweenness, fill = condition)) +
+  geom_violin(alpha = 0.4) +
+  geom_boxplot(width = 0.2) +
+  #stat_compare_means(method = "wilcox.test", label = "p.format") +
+  scale_fill_manual(values = custom_colors) +
+  theme_classic() +
+  labs(title = "Betweenness centrality", 
+       y = "Normalised betweenness",
+       x = "Condition") +
+  theme(legend.position = "none")
+
+# Closeness plot
+p_close <- all_metrics30 %>%
+  ggplot(aes(x = condition, y = closeness, fill = condition)) +
+  geom_violin(alpha = 0.4) +
+  geom_boxplot(width = 0.2) +
+  #stat_compare_means(method = "wilcox.test", label = "p.format") +
+  scale_fill_manual(values = custom_colors) +
+  theme_classic() +
+  labs(title = "Closeness centrality",
+       y = "Normalised closeness",
+       x = "Condition") +
+  theme(legend.position = "none")
+
+# Combine all five panels
+(p1 + p2 + p3) / (p_btwn + p_close + plot_spacer()) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "none")
+
+
+wilcox.test(betweenness ~ condition, data = all_metrics30)
+wilcox.test(closeness   ~ condition, data = all_metrics30)
+
+(p3 + p2) / (p_btwn + p_close) + plot_layout(guides = "collect") &
+  theme(legend.position = "none")
+```
+
+```{r more}
+
+
+
+```
