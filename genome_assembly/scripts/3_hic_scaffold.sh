@@ -1,0 +1,1 @@
+## map hic to fasta

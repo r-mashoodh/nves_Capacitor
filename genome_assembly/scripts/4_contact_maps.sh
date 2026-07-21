@@ -1,0 +1,1 @@
+## GENERATING HiC contact maps

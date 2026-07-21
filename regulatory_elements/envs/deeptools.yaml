@@ -1,0 +1,6 @@
+name: test
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - deeptools
