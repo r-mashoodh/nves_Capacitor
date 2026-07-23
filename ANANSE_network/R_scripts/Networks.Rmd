@@ -1,7 +1,5 @@
 ---
 title: "Network (ANANSE) output summary"
-author: "R. Mashoodh"
-date: "`r Sys.Date()`"
 output: html_document
 ---
 
