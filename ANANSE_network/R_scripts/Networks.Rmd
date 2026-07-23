@@ -23,7 +23,7 @@ source("network_properties_functions.R")
 # load my custom function
 source("plot_network_v2_function.R")
 source("topGO_wrapper.R")
-source("~/Dropbox/Lab/Projects/Beetles/Genome_Reassembly/GRN_ananse/plot_network_dros_names.R")
+source("plot_network_dros_names.R")
 
 ```
 
